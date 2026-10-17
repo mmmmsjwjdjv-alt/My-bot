@@ -23,14 +23,49 @@ ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 CARD_NUMBER_DEFAULT = os.environ.get("CARD_NUMBER", "6219861351165898")
-DB_PATH = os.environ.get("DB_PATH", "/data/bot.db")
+DB_WARNING = ""
+
+def _resolve_db_path():
+    """مسیر دیتابیس رو پیدا می‌کنه و مطمئن می‌شه واقعاً قابل نوشتنه (مشکل رایج Volume در Railway)."""
+    global DB_WARNING
+    candidates = []
+    explicit = os.environ.get("DB_PATH")
+    vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if explicit:
+        candidates.append(explicit)
+    if vol:
+        candidates.append(os.path.join(vol, "bot.db"))
+    candidates.append("/data/bot.db")
+    errors = []
+    for i, path in enumerate(candidates):
+        try:
+            d = os.path.dirname(path) or "."
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".write_test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+            sqlite3.connect(path).close()
+            if errors:
+                DB_WARNING = "؛ ".join(errors)
+                logger.warning(f"مسیر اصلی دیتابیس کار نکرد، از {path} استفاده شد: {DB_WARNING}")
+            return path
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+            logger.error(f"❌ مسیر دیتابیس {path} قابل استفاده نیست: {e}")
+    # آخرین راه: کنار فایل ربات (با هر ری‌دیپلوی پاک می‌شه!)
+    path = os.path.join(os.getcwd(), "bot.db")
+    DB_WARNING = "؛ ".join(errors) + " — دیتابیس موقت ساخته شد و با هر ری‌دیپلوی پاک می‌شه!"
+    logger.error("⚠️ " + DB_WARNING)
+    return path
+
+DB_PATH = _resolve_db_path()
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ متغیر محیطی BOT_TOKEN تنظیم نشده")
 if not ADMIN_IDS:
     raise RuntimeError("❌ متغیر محیطی ADMIN_IDS تنظیم نشده")
 
-os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 BACK_BTN = "بازگشت 🔙"
 
@@ -3193,6 +3228,20 @@ async def handle_admin_photo_states(update, context, state, photo_file_id):
         await update.message.reply_text("✅ کانفیگ تست عکسی ویرایش شد.")
         return
 
+async def _post_init(app):
+    """اگه دیتابیس روی مسیر اصلی (Volume) باز نشده باشه، به مالک‌ها هشدار می‌ده."""
+    if not DB_WARNING:
+        return
+    for oid in get_admin_ids_with("__owners_only__"):
+        try:
+            await app.bot.send_message(
+                oid,
+                "⚠️ هشدار: دیتابیس روی Volume ساخته نشد و از مسیر موقت استفاده می‌شه؛ با هر ری‌دیپلوی اطلاعات پاک می‌شه.\n"
+                "در Railway متغیر RAILWAY_RUN_UID=0 رو اضافه کنید و مطمئن بشید Volume روی /data مونت شده.\n\n"
+                f"جزئیات: {DB_WARNING}")
+        except Exception:
+            pass
+
 # ═════════════════════════ بخش کوین: تنظیمات، زیرمجموعه‌گیری، خرید با کوین، کوین روزانه ═════════════════════════
 
 def get_setting(key, default=None):
@@ -4894,7 +4943,7 @@ async def error_handler(update, context):
 
 def main():
     init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, photo_router))
