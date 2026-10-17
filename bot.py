@@ -23,41 +23,22 @@ ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip().isdigit()]
 CARD_NUMBER_DEFAULT = os.environ.get("CARD_NUMBER", "6219861351165898")
-DB_WARNING = ""
-
 def _resolve_db_path():
-    """مسیر دیتابیس رو پیدا می‌کنه و مطمئن می‌شه واقعاً قابل نوشتنه (مشکل رایج Volume در Railway)."""
-    global DB_WARNING
+    """دیتابیس محلی (بدون Volume). با ری‌دیپلوی پاک می‌شه؛ نگهداری از طریق بکاپ ربات."""
     candidates = []
-    explicit = os.environ.get("DB_PATH")
-    vol = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    if explicit:
-        candidates.append(explicit)
-    if vol:
-        candidates.append(os.path.join(vol, "bot.db"))
-    candidates.append("/data/bot.db")
-    errors = []
-    for i, path in enumerate(candidates):
+    if os.environ.get("DB_PATH"):
+        candidates.append(os.environ["DB_PATH"])
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.db"))
+    candidates.append("/tmp/bot.db")
+    for path in candidates:
         try:
             d = os.path.dirname(path) or "."
             os.makedirs(d, exist_ok=True)
-            probe = os.path.join(d, ".write_test")
-            with open(probe, "w") as f:
-                f.write("ok")
-            os.remove(probe)
             sqlite3.connect(path).close()
-            if errors:
-                DB_WARNING = "؛ ".join(errors)
-                logger.warning(f"مسیر اصلی دیتابیس کار نکرد، از {path} استفاده شد: {DB_WARNING}")
             return path
         except Exception as e:
-            errors.append(f"{path}: {e}")
-            logger.error(f"❌ مسیر دیتابیس {path} قابل استفاده نیست: {e}")
-    # آخرین راه: کنار فایل ربات (با هر ری‌دیپلوی پاک می‌شه!)
-    path = os.path.join(os.getcwd(), "bot.db")
-    DB_WARNING = "؛ ".join(errors) + " — دیتابیس موقت ساخته شد و با هر ری‌دیپلوی پاک می‌شه!"
-    logger.error("⚠️ " + DB_WARNING)
-    return path
+            logger.warning(f"مسیر دیتابیس {path} قابل استفاده نیست: {e}")
+    raise RuntimeError("هیچ مسیر قابل نوشتنی برای دیتابیس پیدا نشد")
 
 DB_PATH = _resolve_db_path()
 
@@ -3229,18 +3210,24 @@ async def handle_admin_photo_states(update, context, state, photo_file_id):
         return
 
 async def _post_init(app):
-    """اگه دیتابیس روی مسیر اصلی (Volume) باز نشده باشه، به مالک‌ها هشدار می‌ده."""
-    if not DB_WARNING:
-        return
-    for oid in get_admin_ids_with("__owners_only__"):
-        try:
-            await app.bot.send_message(
-                oid,
-                "⚠️ هشدار: دیتابیس روی Volume ساخته نشد و از مسیر موقت استفاده می‌شه؛ با هر ری‌دیپلوی اطلاعات پاک می‌شه.\n"
-                "در Railway متغیر RAILWAY_RUN_UID=0 رو اضافه کنید و مطمئن بشید Volume روی /data مونت شده.\n\n"
-                f"جزئیات: {DB_WARNING}")
-        except Exception:
-            pass
+    """اگه دیتابیس خالیه (مثلا بعد از ری‌دیپلوی)، به مالک‌ها یادآوری می‌کنه بکاپ رو بازگردانی کنن."""
+    try:
+        conn = get_conn()
+        n_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        n_plans = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        conn.close()
+        if n_users > 0 or n_plans > 0:
+            return
+        for oid in get_admin_ids_with("__owners_only__"):
+            try:
+                await app.bot.send_message(
+                    oid,
+                    "🔄 ربات روشن شد و دیتابیس خالیه.\n"
+                    "اگه تازه دیپلوی کردی، آخرین فایل بکاپ رو از پنل مدیریت ← «بازگردانی از بکاپ 📥» ارسال کن تا اطلاعات برگرده.")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"post_init error: {e}")
 
 # ═════════════════════════ بخش کوین: تنظیمات، زیرمجموعه‌گیری، خرید با کوین، کوین روزانه ═════════════════════════
 
